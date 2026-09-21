@@ -1,0 +1,46 @@
+sequenceDiagram
+    autonumber
+    participant SH as 父进程 sh（用户态）
+    participant K as 内核 / 系统调用
+    participant C as 调度器
+    participant U as Console / UART
+    participant E as 子进程 echo（用户态）
+
+    SH->>K: read(0, buf) / ecall
+    Note right of K: 保存用户寄存器到 trapframe\n切换到内核栈
+    K->>K: sys_read → consoleread()
+    K->>C: 无输入：sleep_prepare(&cons.r) → sleep/sched
+
+    U-->>K: UART RX 中断（输入回车）
+    K->>K: uartintr → consoleintr → wakeup(&cons.r)
+    K->>C: 将 sh 置为 RUNNABLE
+    C-->>SH: 重新调度 sh，read 返回
+
+    SH->>K: fork()
+    K->>K: allocproc / copyuvm / copyfd
+    K-->>SH: 父进程返回 child pid
+    K->>C: 子进程置为 RUNNABLE
+
+    SH->>K: wait()
+    K->>C: 父进程睡眠，等待子进程退出
+    C-->>E: 调度子进程，fork 返回 0
+
+    E->>K: exec("echo", argv)
+    K->>K: kexec 加载 ELF\n设置 epc / sp / argv
+    K-->>E: 返回用户态，准备执行 echo 首条指令
+
+    E->>K: write(1, "hi\\n")
+    K->>U: sys_write → filewrite → consolewrite → uartwrite
+    opt UART TX 缓冲区满
+        K->>C: sleep_prepare(&uart.tx_chan) → sleep
+        U-->>K: UART TX 中断
+        K->>C: wakeup(&uart.tx_chan)
+        C-->>E: 恢复 echo 执行
+    end
+
+    E->>K: exit()
+    K->>K: state = ZOMBIE
+    K->>C: wakeup(wait)
+    C-->>SH: 恢复父进程
+    SH->>K: wait() 返回并回收子进程
+    K-->>SH: freeproc / 继续 shell

@@ -1,0 +1,27 @@
+sequenceDiagram
+    autonumber
+    participant U as 用户态进程（sh / echo）
+    participant TV as trampoline.uservec
+    participant KT as kerneltrap / devintr
+    participant CLK as Clock / Timer
+    participant S as scheduler
+
+    U->>TV: 计时器中断到达\nscause = 0x8000000000000005
+    TV->>TV: 保存寄存器到 trapframe\n保存 sepc / sstatus
+    TV->>KT: 切换到内核中断处理路径
+    KT->>KT: 判断为 supervisor-timer interrupt
+    KT->>CLK: devintr() → clockintr()
+    CLK-->>KT: ticks++ / wakeup(&ticks)
+
+    alt 满足抢占条件
+        KT->>S: yield() → sched()
+        S-->>KT: 选择并切换到可运行进程
+    else 不抢占
+        KT->>KT: 继续当前进程的返回路径
+    end
+
+    KT->>TV: prepare_return / userret
+    TV->>TV: 恢复 trapframe\n设置 sepc / sstatus
+    TV-->>U: sret 返回 U mode
+
+    Note over KT,S: 若中断发生在系统调用或阻塞路径中，\n应把对应 sleep / wakeup 逻辑单独画在相应系统调用图中，避免与计时器主路径混线。

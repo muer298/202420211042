@@ -1,0 +1,31 @@
+flowchart TB
+    classDef proc fill:#ECFEFF,stroke:#0891B2,color:#0F172A,stroke-width:1.5px;
+    classDef mem fill:#EFF6FF,stroke:#2563EB,color:#0F172A,stroke-width:1.5px;
+    classDef note fill:#FEF9C3,stroke:#CA8A04,color:#422006,stroke-width:1.5px;
+
+    T["快照时刻：exec 已完成，echo 首条用户指令尚未执行"]:::note
+
+    subgraph P[进程状态快照]
+      direction LR
+      I["init\nstate = SLEEPING\nparent = 0"]:::proc
+      SH["sh\nstate = SLEEPING\nwait chan = waitchan\nparent = init"]:::proc
+      E["echo\nstate = RUNNING\nparent = sh\n刚从 exec 返回"]:::proc
+      I -. 父子关系 .-> SH
+      SH -. 父子关系 .-> E
+    end
+
+    subgraph M[echo 地址空间 / 资源快照]
+      direction LR
+      M1["进程大小\nsz ≈ 0x4000"]:::mem
+      M2["代码 / 只读段\n.text / .rodata\nLOAD RX: 0 ~ 0x969"]:::mem
+      M3["可写段\nLOAD RW @ 0x1000\nmemsz = 0x20\nfilesz = 0"]:::mem
+      M4["用户栈\ntop = 0x3fc0\nargv[0] = 'echo'\nargv[1] = 'hi'\nargv[2] = 0"]:::mem
+      M5["文件描述符\nfd 0 / 1 / 2 → console file*\n（常见运行时假设）"]:::mem
+      M1 --> M2 --> M3 --> M4 --> M5
+    end
+
+    N["说明：若课程要求严格对应单核执行，可注明 CPUS=1，\n或说明这是“单核等价时刻”的抽象快照。"]:::note
+
+    T -. 快照对应 .-> E
+    E --> M1
+    M5 --> N
