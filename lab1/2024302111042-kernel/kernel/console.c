@@ -2,6 +2,7 @@
 #include "riscv.h"
 #include "memlayout.h"
 #include "course_sid.h"
+#include "console.h"
 
 #define UART_THR 0
 #define UART_LSR 5
@@ -11,6 +12,13 @@
 #define UART_THROTTLE_BYTES (16U + (COURSE_SID % 16U))
 
 static uint uart_bytes_since_throttle;
+
+void
+consoleinit(void)
+{
+  /* QEMU's reset UART configuration suffices for polling-only output. */
+  uart_bytes_since_throttle = 0;
+}
 
 static volatile uint8 *
 uart_register(uint offset)
@@ -46,7 +54,7 @@ uartputc_sync(int c)
 
 /* Apply the per-student presentation protocol above the raw UART layer. */
 void
-consoleputc(int c)
+consputc(int c)
 {
   uartputc_sync(c);
 #if LAB1_BANNER_PROTOCOL == 1

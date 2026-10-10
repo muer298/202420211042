@@ -2,7 +2,7 @@
 
 #include "types.h"
 
-extern void consoleputc(int c);
+#include "console.h"
 
 static void
 print_unsigned(uint64 value, uint base)
@@ -17,7 +17,7 @@ print_unsigned(uint64 value, uint base)
   } while (value != 0);
 
   while (n != 0)
-    consoleputc(buf[--n]);
+    consputc(buf[--n]);
 }
 
 static void
@@ -26,7 +26,7 @@ print_signed(long value)
   uint64 magnitude;
 
   if (value < 0) {
-    consoleputc('-');
+    consputc('-');
     /* This form also works for the most-negative signed value. */
     magnitude = (uint64)(-(value + 1)) + 1;
   } else {
@@ -41,7 +41,7 @@ print_string(const char *s)
   if (s == 0)
     s = "(null)";
   while (*s != '\0')
-    consoleputc(*s++);
+    consputc(*s++);
 }
 
 /* Minimal freestanding printf: %c, %s, %d, %u, %x and long forms. */
@@ -56,7 +56,7 @@ printf(const char *fmt, ...)
     char spec;
 
     if (*fmt != '%') {
-      consoleputc(*fmt++);
+      consputc(*fmt++);
       continue;
     }
 
@@ -67,14 +67,14 @@ printf(const char *fmt, ...)
     }
     spec = *fmt;
     if (spec == '\0') {
-      consoleputc('%');
+      consputc('%');
       break;
     }
     fmt++;
 
     switch (spec) {
     case 'c':
-      consoleputc(va_arg(ap, int));
+      consputc(va_arg(ap, int));
       break;
     case 's':
       print_string(va_arg(ap, const char *));
@@ -92,19 +92,22 @@ printf(const char *fmt, ...)
         print_unsigned(va_arg(ap, unsigned int), 10);
       break;
     case 'x':
+      /* V2's %x includes the prefix, including for the value zero. */
+      consputc('0');
+      consputc('x');
       if (is_long)
         print_unsigned(va_arg(ap, unsigned long), 16);
       else
         print_unsigned(va_arg(ap, unsigned int), 16);
       break;
     case '%':
-      consoleputc('%');
+      consputc('%');
       break;
     default:
-      consoleputc('%');
+      consputc('%');
       if (is_long)
-        consoleputc('l');
-      consoleputc(spec);
+        consputc('l');
+      consputc(spec);
       break;
     }
   }

@@ -1,4 +1,52 @@
-lab1 初始代码骨架(自动生成)
+lab1 V2：启动与串口输出
+======================
+本实现按《lab1-实验说明书-学生版-V2》校验；上级目录中旧版说明书仅作历史参考。
+个人参数保持不变：学号 2024302111042，协议 1，初始栈 8 KB。
+
+构建与演示（在本目录执行）
+  make
+  make qemu
+  # 退出：Ctrl-a 后按 x。
+
+Makefile 自动选择 riscv64-unknown-elf- 或 Homebrew 的 riscv64-elf- 工具链。
+也可以显式指定 TOOLPREFIX=... 或 CC=... LD=...。
+保留课程提供的链接脚本和 qemu 启动命令；新版 ld 的 RWX LOAD 警告来自
+课程链接布局，实际入口、特权级与运行输出由测试核验。
+
+正式输出
+  原始行：OSLAB1 sid=2024302111042 mod97=0x1a\n
+  按协议 1，在每个字节（含换行）后追加 '.'。
+  expect_banner.txt 共 72 字节，最后两个字节为换行和点号，无额外末尾换行。
+  正式内核不打印测试信息；printf 的 %x 自带小写 0x 前缀，不要写 0x%x。
+
+验证
+  python3 check_expect.py 2024302111042
+  make test
+
+make test 在临时副本中强制重新编译正式内核和独立的 tests/printf_main.c
+测试内核，不覆盖工作目录中的源文件或内核。6 组测试覆盖：
+  1. 入口 0x80000000、按参数分配的 16 字节对齐栈、显式清空 mie；
+  2. 预期文件与独立生成的协议文本一致，并通过课程检查脚本；
+  3. 单核 Banner 与预期文件逐字节一致；
+  4. 四核启动只产生一份 Banner；
+  5. QEMU system_reset 后产生相同的第二份 Banner；
+  6. 0、负数、INT_MIN/MAX、LONG_MIN/MAX、ULONG_MAX、十六进制前缀、
+     空字符串、%%、点号、连续换行、4608 字符输出等格式与协议边界。
+所有实跑同时核对 S 态、satp=0、异常日志为空。
+该测试集针对本学号的协议 1，不声称验证其他学号的协议 0/2。
+
+启动实现
+  entry.S 关闭全局机器中断并清空 mie，从核 park，主核使用 start.c 的栈。
+  start() 配置委托、PMP、mepc、MPP 和 satp；预设定时器/外部中断源掩码，
+  但保持全局 SIE 关闭。mret 后 main() 初始化控制台并打印唯一 Banner。
+  printf -> consputc -> uartputc_sync；底层轮询 UART LSR bit 5 后写 THR。
+  保留旧版按学号派生的 UART 节流，不影响 V2 的串口协议。
+
+版本归档
+  git archive --format=zip -o 提交-lab1-2024302111042.zip lab1-submit
+  标签指向整个仓库快照；编译产物不纳入版本控制，验收时从源码构建。
+
+以下保留初始骨架说明供参考
 ======================
 你所拥有的文件: kernel/kernel.ld(lab1 注释版)、kernel/riscv.h(底层硬件宏定义，完整)、
                Makefile、kernel/course_sid.h(个性化参数文件，请勿修改)。
