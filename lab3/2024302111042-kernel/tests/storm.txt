@@ -1,0 +1,18 @@
+# Gifted programs exercised through the course script command interface.
+SEND hi
+EXPECT hi: user program running, pid=2
+EXPECT sh>[ ]
+SEND badecall
+EXPECT TEST-1 PASS: unknown syscalls all return -1
+EXPECT sh>[ ]
+SEND bufstorm
+WAIT 100
+SEND first
+WAIT 100
+SEND second
+WAIT 100
+SEND third
+WAIT 100
+SEND fourth
+EXPECT BUFSTORM lines=4 bytes=26
+EXPECT sh>[ ]
