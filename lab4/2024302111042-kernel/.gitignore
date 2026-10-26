@@ -1,0 +1,9 @@
+/kernel/*.o
+/kernel/kernel
+/kernel/userimg.S
+/kernel/userimg.S.tmp
+/user/usys.S
+/user-flat/
+/test-results/
+__pycache__/
+*.log
