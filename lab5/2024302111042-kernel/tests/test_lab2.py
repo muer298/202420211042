@@ -26,9 +26,11 @@ class Integration(unittest.TestCase):
         self.session.close()
         self.assertNotIn(b'PANIC', self.session.data)
         self.assertNotIn(b'SELFTEST FAIL', self.session.data)
-        # ecalls (cause 8) are expected synchronous exceptions in lab2.
+        # ecalls (8) and handled Lab5 COW store faults (15) are expected.
         log = self.session.irqpath.read_text()
-        faults = [line for line in log.splitlines() if 'async:0' in line and 'cause:0000000000000008' not in line]
+        allowed = {'cause:0000000000000008', 'cause:000000000000000f'}
+        faults = [line for line in log.splitlines()
+                  if 'async:0' in line and not any(cause in line for cause in allowed)]
         self.assertEqual(faults, [])
 
     def command(self, text, expected):

@@ -48,6 +48,7 @@ clean:
 	rm -rf user-flat kernel/userimg.S user/usys.S kernel/*.o kernel/kernel test-results __pycache__ support/__pycache__ tests/__pycache__
 
 test: kernel/kernel
+	python3 tests/test_lab2.py
 	python3 tests/test_lab3.py
 	python3 tests/test_lab4.py
 	python3 tests/test_lab5.py
