@@ -9,7 +9,7 @@ CFLAGS = -Wall -Werror -O -std=gnu99 -mcmodel=medany -ffreestanding -nostdlib -f
 UFLAGS = -Wall -Werror -O -std=gnu99 -mcmodel=medany -ffreestanding -nostdlib -fno-common -ggdb -march=rv64gc -fno-stack-protector -fno-pie -I.
 QEMU = qemu-system-riscv64
 UPROGS = sh hi spin badecall bufstorm selftest readprobe badaccess memcap pgtbl vmtest bench lottery_test stride_test mlfq_test
-UPROGS += zerocopy cowpair echo
+UPROGS += zerocopy cowpair echo cowtest
 OBJS = kernel/entry.o kernel/start.o kernel/console.o kernel/printf.o kernel/main.o kernel/swtch.o \
        kernel/trampoline.o kernel/kernelvec.o kernel/trap.o kernel/syscall.o \
        kernel/proc.o kernel/vm.o kernel/string.o kernel/userimg.o
@@ -50,6 +50,7 @@ clean:
 test: kernel/kernel
 	python3 tests/test_lab3.py
 	python3 tests/test_lab4.py
+	python3 tests/test_lab5.py
 
 test-lab1:
 	$(MAKE) -C ../../lab1/2024302111042-kernel test

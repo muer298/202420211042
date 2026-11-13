@@ -9,6 +9,7 @@ main(void)
          (uint64)COURSE_SID, (uint)(COURSE_SID % 97));
   console_plain();
   kinit();//物理页分配器——内核怎样取得一张可用的 4KB 页
+  kref_selftest();//验证页引用计数增减与空闲页数守恒
   vm_selftest();
   vm_init();
   w_stvec((uint64)kernelvec);

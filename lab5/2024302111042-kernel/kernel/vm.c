@@ -5,16 +5,29 @@
 #define BITMASK(i) (1U << ((i) & 7))//i & 7 相当于 i % 8，算出该状态位在字节中的位置；1U << ... 则生成对应的位掩码
 
 pagetable_t kernel_pagetable;
-static uchar freebits[(RAM_PAGES + 7) / 8];//位图
+static struct {
+  volatile uint lock;
+  uchar freebits[(RAM_PAGES + 7) / 8];
+  uint16 refcnt[RAM_PAGES];
+  uint64 cow_copies;
+} kmem;
 //位图在这里约占 4KB，释放页只需更新一个位，避免大量释放时链表有序插入的高开销。
 //freebits[0]这个字节，里面 8 个 bit，依次对应页号 0、1、2、3、4、5、6、7。如果最低位是 `1`：第 0 页空闲；置 0，就是分配出去了
 static uint first_page, limit_page;
 static uint64 free_count;
 static int alloc_hint;
 
-static int bit_get(uint i) { return (freebits[BITBYTE(i)] & BITMASK(i)) != 0; }
-static void bit_set(uint i) { freebits[BITBYTE(i)] |= BITMASK(i); }
-static void bit_clear(uint i) { freebits[BITBYTE(i)] &= (uchar)~BITMASK(i); }
+static void kmem_acquire(void) {
+  while (__sync_lock_test_and_set(&kmem.lock, 1)) ;
+  __sync_synchronize();
+}
+static void kmem_release(void) {
+  __sync_synchronize();
+  __sync_lock_release(&kmem.lock);
+}
+static int bit_get(uint i) { return (kmem.freebits[BITBYTE(i)] & BITMASK(i)) != 0; }
+static void bit_set(uint i) { kmem.freebits[BITBYTE(i)] |= BITMASK(i); }
+static void bit_clear(uint i) { kmem.freebits[BITBYTE(i)] &= (uchar)~BITMASK(i); }
 
 void
 kinit(void)
@@ -26,7 +39,7 @@ kinit(void)
   if (LAB3_MEMCAP_DELTA >= limit_page - first_page)
     panic("LAB3 memory cap");
   limit_page -= LAB3_MEMCAP_DELTA;//顶部保留两个物理页
-  memset(freebits, 0, sizeof(freebits));//初始全置为0，每个物理页在位图中占一位
+  memset(&kmem, 0, sizeof(kmem));//初始化空闲位图与引用计数
   for (uint i = first_page; i < limit_page; i++) bit_set(i);//设置位图
   free_count = limit_page - first_page;
 #if LAB3_ALLOC_ORDER == 0
@@ -36,12 +49,13 @@ kinit(void)
 #endif
 }
 
-uint64 kfree_pages(void) { return free_count; }
+uint64 kfree_pages(void) { kmem_acquire(); uint64 n=free_count; kmem_release(); return n; }
 
 //分配一页物理内存
 void *
 kalloc(void)
 {
+  kmem_acquire();
   int found = -1;
 #if LAB3_ALLOC_ORDER == 0
   for (int i = alloc_hint; i < (int)limit_page; i++)
@@ -56,9 +70,11 @@ kalloc(void)
     if (i >= first_page && i < limit_page && bit_get(i)) { found = (int)i; break; }
   }
 #endif
-  if (found < 0) return 0;//如果找不到空闲页，返回空指针，而不是 panic
+  if (found < 0) { kmem_release(); return 0; }//如果找不到空闲页，返回空指针，而不是 panic
   //这是 OOM 能够安全传递到 sbrk、fork、exec 的基础
   bit_clear((uint)found);//清0位图该位，表示不空闲
+  if (kmem.refcnt[found] != 0) panic("kalloc refcnt not zero");
+  kmem.refcnt[found] = 1;
   free_count--;
 #if LAB3_ALLOC_ORDER == 0
   alloc_hint = found + 1;
@@ -66,6 +82,7 @@ kalloc(void)
   alloc_hint = found - 1;//更新下一次搜索位置，之前已经搜索过的地方就不再搜索
 #endif
   void *p = (void *)(KERNBASE + (uint64)(uint)found * PGSIZE);//计算物理地址
+  kmem_release();
   memset(p, 0, PGSIZE);//整页清零
   return p;
 }
@@ -80,8 +97,11 @@ kfree(void *p)
       pa >= KERNBASE + (uint64)limit_page * PGSIZE)
     panic("kfree address");
   uint i = (uint)((pa - KERNBASE) / PGSIZE);
-  if (bit_get(i)) panic("double kfree");
-  memset(p, 0x5a, PGSIZE);//这叫 junk fill，主要用来暴露 use-after-free
+  kmem_acquire();
+  if (bit_get(i) || kmem.refcnt[i] == 0) panic("kfree: refcnt underflow");
+  kmem.refcnt[i]--;
+  if (kmem.refcnt[i] != 0) { kmem_release(); return; }
+  memset(p, 0x5a, PGSIZE);//仅最后一个引用释放时 poison
   //某段代码释放页面后继续通过悬挂指针读取，开发过程中出现过返回地址变成 0x5a5a5a...
   bit_set(i);//置为空闲
   free_count++;
@@ -90,6 +110,54 @@ kfree(void *p)
 #elif LAB3_ALLOC_ORDER == 1
   if ((int)i > alloc_hint) alloc_hint = (int)i;
 #endif
+  kmem_release();
+}
+
+static uint pa_index(uint64 pa) {
+  if (pa % PGSIZE || pa < KERNBASE + (uint64)first_page * PGSIZE ||
+      pa >= KERNBASE + (uint64)limit_page * PGSIZE) panic("kref address");
+  return (uint)((pa - KERNBASE) / PGSIZE);
+}
+
+void kref_inc(uint64 pa) {
+  uint i=pa_index(pa); kmem_acquire();
+  if (bit_get(i) || kmem.refcnt[i] == 0 || kmem.refcnt[i] == 0xffff)
+    panic("kref_inc invalid");
+  kmem.refcnt[i]++; kmem_release();
+}
+
+int kref_get(uint64 pa) {
+  uint i=pa_index(pa); kmem_acquire();
+  int n=kmem.refcnt[i]; kmem_release(); return n;
+}
+
+uint64 kshared_count(void) {
+  uint64 n=0; kmem_acquire();
+  for (uint i=first_page;i<limit_page;i++) if (kmem.refcnt[i]>1) n++;
+  kmem_release(); return n;
+}
+
+uint64 kcow_copy_count(void) {
+  kmem_acquire(); uint64 n=kmem.cow_copies; kmem_release(); return n;
+}
+
+void kcow_copy_record(void) {
+  kmem_acquire(); kmem.cow_copies++; kmem_release();
+}
+
+void kref_selftest(void) {
+  uint64 free0=kfree_pages();
+  uchar *p=kalloc();
+  if (!p || kref_get((uint64)p)!=1 || kfree_pages()!=free0-1)
+    panic("kref selftest alloc");
+  p[0]=0x37;
+  kref_inc((uint64)p); kref_inc((uint64)p);
+  if (kref_get((uint64)p)!=3 || kshared_count()!=1) panic("kref selftest share");
+  kfree(p); if (kref_get((uint64)p)!=2 || p[0]!=0x37) panic("kref selftest release 1");
+  kfree(p); if (kref_get((uint64)p)!=1 || p[0]!=0x37) panic("kref selftest release 2");
+  kfree(p);
+  if (kfree_pages()!=free0 || kshared_count()!=0) panic("kref selftest balance");
+  printf("LAB5-SELFTEST PASS refcnt alloc/share/release balance\n");
 }
 //页表生命周期管理
 //SV39 页表——虚拟地址如何变成物理地址
@@ -273,35 +341,91 @@ free_user_pagetable(pagetable_t pt)
 static int
 copy_user_level(pagetable_t src, pagetable_t dst, int level, uint64 base)
 {
-  for (int i = 0; i < 512; i++) {// 一张页表512个PTE
-    pte_t pte = src[i];
-    if (!(pte & PTE_V)) continue;//无效直接跳过，guard不会被复制
-    //计算这个PTE对应的虚拟地址前缀
-    uint64 va = base | ((uint64)i << PXSHIFT(level));
-    //叶PTE
+  for (int i=0; i<512; i++) {
+    pte_t pte=src[i];
+    if (!(pte & PTE_V)) continue; // guard 页等空洞不复制
+    uint64 va=base | ((uint64)i << PXSHIFT(level));
     if (pte & (PTE_R | PTE_W | PTE_X)) {
-      if (!(pte & PTE_U)) continue;//不带PTE_U的内核页跳过
-      //只拷贝【用户页】：也就是0~sz的代码/数据/栈页
-      //TRAMPOLINE、TRAPFRAME没有PTE_U，直接continue，不拷贝
-      void *page = kalloc();// 给子分配一块全新物理页 // 外部调用 `kalloc` 分配用户数据叶页
-      if (!page) return -1;
-      memcpy(page, (void *)PTE2PA(pte), PGSIZE);// 把父页面完整复制到新页，深拷贝不是共享物理页
-      uint64 flags = PTE_FLAGS(pte) & ~(PTE_V | PTE_A | PTE_D);//复制PTE标志，清除V/A/D，V`mappages`内部会自动设置，A/D是硬件自动置位的状态位，新建子 PTE 清零，从初始干净状态开始
-      if (mappages(dst, va, PGSIZE, (uint64)page, flags) < 0) {//在子页表里插入新 PTE，va 不变、pa 是子的新物理页，权限和父一致
-        kfree(page);//appages失败，防止内存泄漏，释放刚分配的子页
-        return -1;
+      if (!(pte & PTE_U)) continue; // trampoline/trapframe 不参与 COW
+      uint64 pa=PTE2PA(pte);
+      uint64 flags=PTE_FLAGS(pte) & ~(PTE_V | PTE_A | PTE_D);
+      if (flags & PTE_W) {
+        flags=(flags & ~PTE_W) | PTE_COW;
+        src[i]=PA2PTE(pa) | flags | PTE_V;
       }
-    } else if (level > 0 &&//这是非叶PTE（中间页表，L2/L1，继续往下递归）
-               copy_user_level((pagetable_t)PTE2PA(pte), dst, level - 1, va) < 0) {
+      if (mappages(dst, va, PGSIZE, pa, flags) < 0) return -1;
+      kref_inc(pa);
+    } else if (level > 0 &&
+               copy_user_level((pagetable_t)PTE2PA(pte), dst, level-1, va) < 0) {
       return -1;
     }
   }
   return 0;
 }
 
-//由 mappages 内部的 walk 按需为子进程新建配套的中间页表，构造一套独立、结构相同的子页表树
-//src：父进程页表；dst：子进程新建的空白根页表
-int uvmcopy(pagetable_t src, pagetable_t dst) { return copy_user_level(src, dst, 2, 0); }//从最高层 level=2、虚拟地址前缀 base=0 开始递归遍历
+static volatile uint cow_lock;
+static void cow_acquire(void) {
+  while (__sync_lock_test_and_set(&cow_lock, 1)) ;
+  __sync_synchronize();
+}
+static void cow_release(void) {
+  __sync_synchronize();
+  __sync_lock_release(&cow_lock);
+}
+
+int
+uvmcopy(pagetable_t src, pagetable_t dst)
+{
+  cow_acquire();
+  int result=copy_user_level(src, dst, 2, 0);
+  sfence_vma(); // 父进程可写 PTE 已被改成 COW 只读
+  cow_release();
+  return result;
+}
+
+int
+cow_alloc(pagetable_t pagetable, uint64 va)
+{
+  if (va >= MAXVA) return -1;
+  uint64 va0=PGROUNDDOWN(va);
+  cow_acquire();
+  pte_t *pte=walk(pagetable, va0, 0);
+  if (!pte || !(*pte & PTE_V) || !(*pte & PTE_U) ||
+      !(*pte & (PTE_R | PTE_W | PTE_X))) {
+    cow_release(); return -1;
+  }
+  if (*pte & PTE_W) { cow_release(); return 0; }
+  if (!(*pte & PTE_COW)) { cow_release(); return -1; }
+
+  uint64 oldpa=PTE2PA(*pte);
+  int refs=kref_get(oldpa);
+  if (refs < 1) { cow_release(); return -1; }
+  uint64 flags=PTE_FLAGS(*pte);
+  if (refs == 1) {
+    *pte=PA2PTE(oldpa) | ((flags & ~PTE_COW) | PTE_W | PTE_D);
+    sfence_vma();
+    cow_release();
+    return 0;
+  }
+
+  void *newpage=kalloc();
+  if (!newpage) { cow_release(); return -1; }
+  memcpy(newpage, (void *)oldpa, PGSIZE);
+  *pte=PA2PTE((uint64)newpage) | ((flags & ~PTE_COW) | PTE_W | PTE_D);
+  kcow_copy_record();
+  kfree((void *)oldpa);
+  if (current) {
+    current->cow_copies++;
+    if (current->cow_copies >= LAB5_COW_BUDGET && !current->cow_budget_warned) {
+      current->cow_budget_warned=1;
+      printf("[cow] pid=%d reached LAB5_COW_BUDGET=%d, downgrade: continue copying\n",
+             current->pid, LAB5_COW_BUDGET);
+    }
+  }
+  sfence_vma();
+  cow_release();
+  return 0;
+}
 
 //给一段连续虚拟地址区间 `[start, end)`，逐页分配全新物理页，并且建立映射
 static int
@@ -355,6 +479,11 @@ user_access(struct proc *p, uint64 va, uint64 n, int write)
   for (uint64 page = PGROUNDDOWN(va); ; page += PGSIZE) {
     // walk：在进程p的页表里，查找page这个VA对应的PTE；第三个参数0代表【不自动创建下级页表】，只查询
     pte_t *pte = walk(p->pagetable, page, 0);
+    if (write && pte && (*pte & PTE_V) && !(*pte & PTE_W) &&
+        (*pte & PTE_COW)) {
+      if (cow_alloc(p->pagetable, page) < 0) return 0;
+      pte = walk(p->pagetable, page, 0);
+    }
     uint64 need = PTE_V | PTE_U | (write ? PTE_W : PTE_R);
     // 失败条件三选一：
     // ① pte == NULL：找不到PTE（这个虚拟页没有映射，是空洞）
@@ -380,6 +509,11 @@ transfer(struct proc *p, void *kernel, uint64 user, uint64 n, int out, int requi
   while (n) {// 还有字节要拷贝就循环
     uint64 pageva = PGROUNDDOWN(user);// 当前用户地址所在页的页起始VA
     pte_t *pte = walk(p->pagetable, pageva, 0);// 查询这个VA对应的PTE，不新建页表
+    if (out && require_user && pte && (*pte & PTE_V) &&
+        !(*pte & PTE_W) && (*pte & PTE_COW)) {
+      if (cow_alloc(p->pagetable, pageva) < 0) return -1;
+      pte = walk(p->pagetable, pageva, 0);
+    }
     if (!pte || !(*pte & PTE_V) || !(*pte & (PTE_R | PTE_W | PTE_X)) ||
         (require_user && !(*pte & PTE_U)) ||
         (out && require_user && !(*pte & PTE_W)) ||

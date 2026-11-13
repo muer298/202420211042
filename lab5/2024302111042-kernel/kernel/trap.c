@@ -48,6 +48,14 @@ void usertrap(void) {
   if(cause==8) {
     current->tf->epc+=4;
     syscall();
+  } else if(cause==15) {
+#if LAB5_KILL_SEMANTICS == 0
+    if (current->killed) proc_exit(current->status ? current->status : 130);
+#endif
+    if (cow_alloc(current->pagetable, r_stval()) < 0) {
+      printf("usertrap pid=%d store page fault va=%lx\n", current->pid, r_stval());
+      proc_fault(cause);
+    }
   } else {
     int dev=device_intr(cause);//判断中断类型
     if(!dev) {
@@ -57,6 +65,7 @@ void usertrap(void) {
     }
     if(dev==2 && current->state==RUNNING) proc_timer_tick();//如果是时钟中断（dev == 2），且当前进程仍为 RUNNING，调用 proc_timer_tick()
   }
+  if (current->killed) proc_exit(current->status ? current->status : 130);
   if(current->state!=RUNNING) proc_yield();//如果处理后进程状态已经不是 RUNNING，调用 proc_yield() 切回调度器
   usertrapret();
 }

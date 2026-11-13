@@ -11,6 +11,7 @@
 #define TIMER_INTERVAL 100000UL//定时器多久触发一次，一次定时器中断推进一个 tic
 #define PTE_A (1L << 6)
 #define PTE_D (1L << 7)
+#define PTE_COW (1L << 8) /* RISC-V Sv39 software-reserved PTE bit. */
 
 /* Exact ABI of the immutable gifted trampoline.S, in bytes. */
 struct trapframe {
@@ -56,6 +57,9 @@ struct proc {
   /*这个进程累计占用 CPU 的时钟 tick 总数（统计）；
   本次在当前 MLFQ 队列里已经跑了多少 tick！MLFQ 核心字段：用来判断是不是把时间片用完了，要不要降级 level*/
   int tickets, level;
+  int cow_copies;
+  int cow_budget_warned;
+  int killed;
   /*tickets：彩票调度（lottery）的票数；多个调度策略共存的时候用
   level：MLFQ 队列级别；四级 MLFQ：比如 0 = 最高优先级队列，3 = 最低队列。调度器根据 level 放到对应反馈队列、按规则升降级*/
   pagetable_t pagetable;
@@ -87,6 +91,12 @@ void kinit(void);
 void *kalloc(void);
 void kfree(void *);
 uint64 kfree_pages(void);
+void kref_inc(uint64);
+int kref_get(uint64);
+uint64 kshared_count(void);
+uint64 kcow_copy_count(void);
+void kcow_copy_record(void);
+void kref_selftest(void);
 void vm_selftest(void);
 void vm_init(void);
 pte_t *walk(pagetable_t, uint64, int);
@@ -95,6 +105,7 @@ void uvmunmap(pagetable_t, uint64, uint64, int);
 pagetable_t proc_pagetable(struct proc *);
 void free_user_pagetable(pagetable_t);
 int uvmcopy(pagetable_t, pagetable_t);
+int cow_alloc(pagetable_t, uint64);
 int uvmalloc(struct proc *, uint64, uint64);
 int uvmdealloc(struct proc *, uint64, uint64);
 int uvm_load_bytes(struct proc *, uint64, const void *, uint64);
@@ -115,7 +126,7 @@ int proc_schedstat(int, uint64 *, uint64 *);
 int proc_settickets(int);
 void swtch(void *, void *);
 void forkret(void) __attribute__((noreturn));
-int proc_exec(struct proc *, const char *);
+int proc_exec(struct proc *, const char *, char *const [], int);
 int proc_fork(void);
 void proc_exit(int);
 int proc_wait(struct proc *, int *);

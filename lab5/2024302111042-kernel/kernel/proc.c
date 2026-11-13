@@ -54,6 +54,10 @@ static void unlock(volatile uint *l) {
 }
 extern uint64 _uprog_table[];
 
+static uint64 kstrlen(const char *s) {
+  uint64 n=0; while (s[n]) n++; return n;
+}
+
 static void
 release(struct proc *p)
 {
@@ -122,7 +126,7 @@ map_new_pages(pagetable_t pt, uint64 start, uint64 end, uint64 perm)
 //加载一个用户程序，为进程 p 新建一套独立用户页表、划分用户地址空间布局、拷贝程序镜像、设置 trapframe 入口与栈指针
 //proc_exec不是原地修改旧页表，而是从头到尾新建一张完整用户页表，全部准备妥当之后，再用新页表替换掉进程原来的旧页表
 int
-proc_exec(struct proc *p, const char *name)
+proc_exec(struct proc *p, const char *name, char *const argv[], int argc)
 {
   uint64 *entry = _uprog_table;
   //预定义的程序表，存放每个用户程序的元信息：`bin_start / bin_end / data_start / memsz / 程序名字符串`
@@ -167,12 +171,37 @@ proc_exec(struct proc *p, const char *name)
         return -1;
       }
 
+      if (argc < 0 || argc > MAXARG) { free_user_pagetable(newpt); return -1; }
+      uint64 ustack[MAXARG + 1];
+      uint64 sp=stack_top;
+      for (int i=0; i<argc; i++) {
+        if (!argv || !argv[i]) { free_user_pagetable(newpt); return -1; }
+        uint64 len=kstrlen(argv[i])+1;
+        if (len > PGSIZE || sp < stack_base + len) {
+          free_user_pagetable(newpt); return -1;
+        }
+        sp=(sp-len) & ~0xfUL;
+        if (sp < stack_base || copyout(&shadow, sp, argv[i], len) < 0) {
+          free_user_pagetable(newpt); return -1;
+        }
+        ustack[i]=sp;
+      }
+      ustack[argc]=0;
+      uint64 argbytes=(uint64)(argc+1)*sizeof(uint64);
+      if (sp < stack_base + argbytes) { free_user_pagetable(newpt); return -1; }
+      sp=(sp-argbytes) & ~0xfUL;
+      if (sp < stack_base || copyout(&shadow, sp, ustack, argbytes) < 0) {
+        free_user_pagetable(newpt); return -1;
+      }
+
       //构造新的陷阱帧trapframe
       //这里只是在栈上临时搭一个陷阱帧副本 ntf，还没有写进进程真正的 trapframe 页。
       struct trapframe ntf;
       memset(&ntf, 0, sizeof(ntf));
       ntf.epc = 0;// 程序入口地址设为0（用户程序从虚拟地址0开始执行）
-      ntf.sp = stack_top;// sp初始值 = stack_top（栈向下增长）
+      ntf.sp = sp;
+      ntf.a0 = argc;
+      ntf.a1 = sp;
       //把新页表、地址区间边界写进进程控制块 struct proc
       p->pagetable = newpt;//进程正式挂上刚建好的新用户页表；以后这个进程运行、trap、缺页 fault，都用这张页表翻译地址；
       p->data_start = data_start;
@@ -190,7 +219,7 @@ proc_exec(struct proc *p, const char *name)
       free_user_pagetable(oldpt);
       //带 PTE_U 的高地址映射：只清除 PTE，不会释放 trampoline 和 trapframe 物理页
       //是 exec 之前进程正在使用的旧页表（比如 exec 之前跑别的程序）
-      return 0;
+      return argc;
     }
     /* Descriptor/name is followed by its binary, then the next descriptor. */
     // 跳到下一个程序描述符
@@ -206,7 +235,7 @@ proc_init(void)
 {
   proc_scheduler_init();
   struct proc *p = allocate();
-  if (!p || proc_exec(p, "sh")) panic("load sh");
+  if (!p || proc_exec(p, "sh", 0, 0) < 0) panic("load sh");
   dump_pagetable(p->pagetable);
 }
 
@@ -327,11 +356,12 @@ proc_kill(int pid)
   for (int i = 0; i < NPROC; i++)
     if (processes[i].pid == pid) {
       struct proc *p=&processes[i]; acquire(p);
-      if (p->state == UNUSED) { release_lock(p); continue; }
-      p->status = 130; p->state = ZOMBIE; p->pending = NONE;
-      int parent=p->parent;
+      if (p->state == UNUSED || p->state == ZOMBIE || p->state == REAPING) {
+        release_lock(p); continue;
+      }
+      p->killed=1; p->status=130;
+      if (p->state == SLEEPING) p->state=RUNNABLE;
       release_lock(p);
-      proc_wakeup((uint64)parent);
       return 0;
     }
   return -1;
@@ -409,7 +439,7 @@ void forkret(void) {
 void proc_yield(void) {
   struct proc *p=current; acquire(p);//获取当前进程锁
   if (p->state == RUNNING) p->state=RUNNABLE;//若状态仍是 RUNNING，改为 RUNNABLE
-  swtch(&p->context, &cpu0\\.scheduler);//切回调度器
+  swtch(&p->context, &cpu0.scheduler);//切回调度器
   //切换点保存和恢复的是内核态 context；
   //被中断的用户寄存器由 trapframe 和 trampoline 保存、恢复。这也是为什么这条链路里会同时看到 trap 处理和 swtch()。
   release_lock(p);

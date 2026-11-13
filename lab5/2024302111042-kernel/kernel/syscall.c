@@ -44,7 +44,30 @@ void syscall(void) {
       if(copyinstr(current,name,argaddr(0),sizeof(name))) break;
       int n=0; while(name[n]) n++;
       while(n && (name[n-1]=='\n' || name[n-1]=='\r')) name[--n]=0;
-      result=proc_exec(current,name);
+      uint64 uargv=argaddr(1);
+      char *argv[MAXARG];
+      int argc=0, bad=0, terminated=(uargv==0);
+      uchar *argpage=kalloc();
+      if (!argpage) break;
+      uint64 off=0;
+      for (int i=0; uargv && i<=MAXARG; i++) {
+        uint64 ustr=0;
+        if (copyin(current,&ustr,uargv+(uint64)i*sizeof(uint64),sizeof(ustr))) {
+          bad=1; break;
+        }
+        if (!ustr) { terminated=1; break; }
+        if (i==MAXARG || off>=PGSIZE ||
+            copyinstr(current,(char *)argpage+off,ustr,PGSIZE-off)) {
+          bad=1; break;
+        }
+        argv[argc++]=(char *)argpage+off;
+        while (off<PGSIZE && argpage[off]) off++;
+        if (off>=PGSIZE) { bad=1; break; }
+        off++;
+      }
+      if (bad || !terminated) result=-1;
+      else result=proc_exec(current,name,argv,argc);
+      kfree(argpage);
       break;
     }
     case SYS_exit: proc_exit(argint(0)); return;
@@ -68,7 +91,7 @@ void syscall(void) {
       if(argint(0)>0) {
         //它先算出目标 tick
         uint64 until=ticks+(uint)argint(0);
-        while(ticks<until) proc_sleep((uint64)&ticks, 0);
+        while(ticks<until && !current->killed) proc_sleep((uint64)&ticks, 0);
         //用while不用if：要有人唤醒这个通道，通道上所有睡觉的进程，全部一起被叫醒
         //等待通道channel，这里用全局变量 ticks 的地址当作等待标记
         //然后睡在 &ticks 这个 channel 上。使用 while 是因为被唤醒后还要重新检查时间是否真的到了；若未到，就继续睡眠。
@@ -90,6 +113,12 @@ void syscall(void) {
     }
     case SYS_time_rdtime: result=(long)r_time(); break;
     case SYS_setickets: result=proc_settickets(argint(0)); break;
+    case SYS_pmc: {
+      int which=argint(0);
+      if (which==0) result=(long)kcow_copy_count();
+      else if (which==1) result=(long)kshared_count();
+      break;
+    }
     default: break;
   }
   if(current->state==RUNNING) current->tf->a0=result;
